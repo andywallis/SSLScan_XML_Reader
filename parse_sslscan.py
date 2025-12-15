@@ -9,6 +9,8 @@ This script identifies hosts with:
 - Compression enabled (CRIME vulnerability)
 - Heartbleed vulnerability
 - Other security concerns
+
+Outputs findings in Typst format for documentation.
 """
 
 import xml.etree.ElementTree as ET
@@ -36,7 +38,7 @@ WEAK_CIPHER_INDICATORS = [
     'RC2',
     'IDEA',
     '3DES',
-    'CBC'  # CBC mode can be vulnerable to padding oracle attacks
+    'CBC'
 ]
 
 # Insecure protocols
@@ -51,7 +53,7 @@ INSECURE_PROTOCOLS = [
 class SSLIssue:
     """Represents an SSL/TLS security issue"""
     def __init__(self, severity: str, category: str, description: str):
-        self.severity = severity  # critical, high, medium, low
+        self.severity = severity
         self.category = category
         self.description = description
     
@@ -89,16 +91,14 @@ def parse_sslscan_xml(xml_file: str) -> List[HostResult]:
         tree = ET.parse(xml_file)
         root = tree.getroot()
     except ET.ParseError as e:
-        print(f"{RED}[!] Error parsing XML file: {e}{RESET}")
+        print(f"{RED}[!] Error parsing XML file: {e}{RESET}", file=sys.stderr)
         sys.exit(1)
     except FileNotFoundError:
-        print(f"{RED}[!] File not found: {xml_file}{RESET}")
+        print(f"{RED}[!] File not found: {xml_file}{RESET}", file=sys.stderr)
         sys.exit(1)
     
     results = []
     
-    # SSLscan XML can have different structures depending on version
-    # Try to find all ssltest elements
     for ssltest in root.findall('.//ssltest'):
         host = ssltest.get('host', 'unknown')
         port = ssltest.get('port', '443')
@@ -116,7 +116,6 @@ def parse_sslscan_xml(xml_file: str) -> List[HostResult]:
             if enabled == '1':
                 result.enabled_protocols.append(full_protocol)
                 
-                # Check if it's an insecure protocol
                 if any(insecure in full_protocol for insecure in INSECURE_PROTOCOLS):
                     severity = 'critical' if 'SSLv' in full_protocol else 'high'
                     result.add_issue(
@@ -133,7 +132,6 @@ def parse_sslscan_xml(xml_file: str) -> List[HostResult]:
             sslversion = cipher.get('sslversion', '')
             
             if cipher_status == 'accepted':
-                # Check for weak ciphers
                 is_weak = any(weak in cipher_name.upper() for weak in WEAK_CIPHER_INDICATORS)
                 
                 if is_weak:
@@ -143,7 +141,6 @@ def parse_sslscan_xml(xml_file: str) -> List[HostResult]:
                         'protocol': sslversion
                     })
                     
-                    # Determine severity
                     if any(x in cipher_name.upper() for x in ['NULL', 'ANON', 'EXPORT']):
                         severity = 'critical'
                     elif any(x in cipher_name.upper() for x in ['DES', 'RC4', 'MD5']):
@@ -157,7 +154,6 @@ def parse_sslscan_xml(xml_file: str) -> List[HostResult]:
                         f"{cipher_name} ({cipher_strength} bits) on {sslversion}"
                     )
                 
-                # Check for low bit strength
                 try:
                     bits = int(cipher_strength)
                     if bits < 128 and not is_weak:
@@ -171,13 +167,6 @@ def parse_sslscan_xml(xml_file: str) -> List[HostResult]:
         
         # Check for certificate issues
         for cert in ssltest.findall('.//certificate'):
-            # Check expiration
-            not_valid_after = cert.find('.//not-valid-after')
-            if not_valid_after is not None and not_valid_after.text:
-                # Note: Proper date validation would require parsing the date
-                pass
-            
-            # Check for self-signed
             self_signed = cert.find('.//self-signed')
             if self_signed is not None and self_signed.text == 'true':
                 result.add_issue(
@@ -187,7 +176,6 @@ def parse_sslscan_xml(xml_file: str) -> List[HostResult]:
                 )
                 result.certificate_issues.append('Self-signed')
             
-            # Check signature algorithm
             signature_algorithm = cert.find('.//signature-algorithm')
             if signature_algorithm is not None:
                 sig_alg = signature_algorithm.text or ''
@@ -233,11 +221,99 @@ def parse_sslscan_xml(xml_file: str) -> List[HostResult]:
                     'Insecure renegotiation is supported'
                 )
         
-        # Only add hosts that have issues
         if result.has_issues():
             results.append(result)
     
     return results
+
+
+def print_typst_output(results: List[HostResult]):
+    """Print results in Typst format"""
+    
+    if not results:
+        print("// No hosts with SSL/TLS issues found")
+        return
+    
+    print("#let affected_hosts = (")
+    
+    entries = []
+    for result in results:
+        for issue in result.issues:
+            # Map category to vulnerability name
+            vuln_name = ""
+            details = ""
+            
+            if issue.category == "Insecure Protocol":
+                vuln_name = "Vulnerable TLS version supported"
+                # Extract protocol version from description
+                if "SSLv2" in issue.description:
+                    details = "SSLv2"
+                elif "SSLv3" in issue.description:
+                    details = "SSLv3"
+                elif "TLSv1.0" in issue.description:
+                    details = "TLS1.0"
+                elif "TLSv1.1" in issue.description:
+                    details = "TLS1.1"
+                else:
+                    details = issue.description
+            
+            elif issue.category == "Weak Cipher":
+                vuln_name = "Weak cipher suite supported"
+                details = issue.description
+            
+            elif issue.category == "Weak Key Size":
+                vuln_name = "Weak encryption key size"
+                details = issue.description
+            
+            elif issue.category == "Certificate Issue":
+                vuln_name = "Certificate issue"
+                details = issue.description
+            
+            elif issue.category == "Weak Certificate Signature":
+                vuln_name = "Weak certificate signature algorithm"
+                details = issue.description
+            
+            elif issue.category == "Compression Enabled":
+                vuln_name = "TLS compression enabled (CRIME)"
+                details = issue.description
+            
+            elif issue.category == "Heartbleed":
+                vuln_name = "Heartbleed vulnerability"
+                details = "CVE-2014-0160"
+            
+            elif issue.category == "Insecure Renegotiation":
+                vuln_name = "Insecure renegotiation"
+                details = issue.description
+            
+            else:
+                vuln_name = issue.category
+                details = issue.description
+            
+            entries.append({
+                'hostname': result.host,
+                'port': result.port,
+                'vuln': vuln_name,
+                'details': details
+            })
+    
+    for i, entry in enumerate(entries):
+        hostname = entry['hostname'].replace('"', '\\"')
+        port = entry['port']
+        vuln = entry['vuln'].replace('"', '\\"')
+        details = entry['details'].replace('"', '\\"')
+        
+        print(f"  (")
+        print(f'    hostname: "{hostname}",')
+        print(f'    port: "{port}",')
+        print(f'    vuln: "{vuln}",')
+        print(f'    details: "{details}"')
+        
+        if i < len(entries) - 1:
+            print(f"  ),")
+        else:
+            print(f"  )")
+    
+    print(")")
 
 
 def print_results(results: List[HostResult], output_format: str = 'detailed'):
@@ -247,14 +323,16 @@ def print_results(results: List[HostResult], output_format: str = 'detailed'):
         print(f"{GREEN}[+] No hosts with SSL/TLS issues found!{RESET}")
         return
     
+    if output_format == 'typst':
+        print_typst_output(results)
+        return
+    
     if output_format == 'ip-only':
-        # Just print IP addresses
         print(f"{BOLD}Hosts with SSL/TLS Issues:{RESET}\n")
         for result in results:
             print(f"{result.host}:{result.port}")
     
     elif output_format == 'summary':
-        # Print IPs with issue count
         print(f"{BOLD}Hosts with SSL/TLS Issues:{RESET}\n")
         for result in results:
             severity_counts = result.get_severity_count()
@@ -286,7 +364,6 @@ def print_results(results: List[HostResult], output_format: str = 'detailed'):
             print(f"{CYAN}{BOLD}Host: {result.host}:{result.port}{RESET}")
             print(f"{CYAN}{BOLD}{'─'*80}{RESET}\n")
             
-            # Group issues by severity
             critical_issues = [i for i in result.issues if i.severity == 'critical']
             high_issues = [i for i in result.issues if i.severity == 'high']
             medium_issues = [i for i in result.issues if i.severity == 'medium']
@@ -316,7 +393,6 @@ def print_results(results: List[HostResult], output_format: str = 'detailed'):
                     print(f"  • {issue.category}: {issue.description}")
                 print()
             
-            # Show enabled protocols
             if result.enabled_protocols:
                 print(f"{BOLD}Enabled Protocols:{RESET}")
                 print(f"  {', '.join(result.enabled_protocols)}\n")
@@ -325,7 +401,6 @@ def print_results(results: List[HostResult], output_format: str = 'detailed'):
         
         print(f"{BOLD}{'='*80}{RESET}\n")
         
-        # Summary statistics
         total_critical = sum(1 for r in results for i in r.issues if i.severity == 'critical')
         total_high = sum(1 for r in results for i in r.issues if i.severity == 'high')
         total_medium = sum(1 for r in results for i in r.issues if i.severity == 'medium')
@@ -347,11 +422,13 @@ def main():
         epilog="""
 Examples:
   %(prog)s -f sslscan_output.xml
+  %(prog)s -f sslscan_output.xml -o typst > findings.typ
   %(prog)s -f sslscan_output.xml -o ip-only
   %(prog)s -f sslscan_output.xml -o summary > vulnerable_hosts.txt
   
 Output formats:
   detailed  - Full report with all issues (default)
+  typst     - Typst format for documentation
   summary   - IP addresses with issue counts
   ip-only   - Just IP:port (one per line)
         """
@@ -365,7 +442,7 @@ Output formats:
     
     parser.add_argument(
         '-o', '--output',
-        choices=['detailed', 'summary', 'ip-only'],
+        choices=['detailed', 'summary', 'ip-only', 'typst'],
         default='detailed',
         help='Output format (default: detailed)'
     )
@@ -379,16 +456,13 @@ Output formats:
     
     args = parser.parse_args()
     
-    # Parse the XML file
     results = parse_sslscan_xml(args.file)
     
-    # Filter by severity if requested
     severity_order = {'critical': 4, 'high': 3, 'medium': 2, 'low': 1}
     min_severity_value = severity_order[args.min_severity]
     
     filtered_results = []
     for result in results:
-        # Check if any issue meets minimum severity
         has_qualifying_issue = any(
             severity_order[issue.severity] >= min_severity_value
             for issue in result.issues
@@ -396,7 +470,6 @@ Output formats:
         if has_qualifying_issue:
             filtered_results.append(result)
     
-    # Print results
     print_results(filtered_results, args.output)
 
 
